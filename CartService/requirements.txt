@@ -1,0 +1,12 @@
+# Web Framework
+fastapi==0.109.0
+uvicorn==0.27.0
+pydantic==2.5.3
+
+# Kafka with Avro and Schema Registry
+confluent-kafka[avro]==2.3.0
+avro-python3==1.10.2
+
+# Utilities
+python-dateutil==2.8.2
+
