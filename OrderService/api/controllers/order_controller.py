@@ -86,6 +86,10 @@ async def get_order_details(
             data=order_with_shipping
         )
     
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    
     except ValueError as e:
         # Order not found
         logger.warning(f"Order not found: {str(e)}")
