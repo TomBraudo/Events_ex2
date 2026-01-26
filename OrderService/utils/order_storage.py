@@ -19,12 +19,24 @@ class OrderStorage:
         
         Args:
             order_with_shipping: Order dictionary with shippingCost field
+            
+        Raises:
+            ValueError: If order is invalid or missing orderId
+            TypeError: If order is not a dictionary
         """
+        if not isinstance(order_with_shipping, dict):
+            raise TypeError(f"Order must be a dictionary, got {type(order_with_shipping).__name__}")
+        
+        order_id = order_with_shipping.get("orderId")
+        if not order_id:
+            raise ValueError("Order must have 'orderId' field")
+        
+        if not isinstance(order_id, str) or not order_id.strip():
+            raise ValueError(f"orderId must be a non-empty string, got: {order_id}")
+        
         with self._lock:
-            order_id = order_with_shipping.get("orderId")
-            if order_id:
-                self._orders[order_id] = order_with_shipping
-                logger.info(f"Order saved to storage: {order_id}, shippingCost: {order_with_shipping.get('shippingCost')}")
+            self._orders[order_id] = order_with_shipping
+            logger.info(f"Order saved to storage: {order_id}, shippingCost: {order_with_shipping.get('shippingCost')}")
     
     def get_order(self, order_id: str) -> Optional[Dict[str, Any]]:
         """

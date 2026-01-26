@@ -149,3 +149,7 @@ Thumbs.db
 
 # Kafka / Event Streaming
 *.log.*
+
+# Schema cache files (runtime generated)
+.schema_cache
+.dlq_schema_cache

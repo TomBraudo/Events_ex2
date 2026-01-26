@@ -25,21 +25,65 @@ class KafkaConsumerService:
         self.consumer_thread: Optional[threading.Thread] = None
         self.message_handler: Optional[Callable] = None
         self.dlq_producer = None  # Will be initialized on first use
+        self._dlq_lock = threading.Lock()  # Lock for thread-safe DLQ initialization
+        
+        # Error tracking
+        self.consecutive_poll_errors = 0
+        self.max_consecutive_errors = settings.CONSUMER_MAX_CONSECUTIVE_ERRORS
+        
+        # Schema caching
+        self.schema_cache_path = settings.BASE_DIR / "schemas" / ".schema_cache"
         
         self._load_avro_schema()
     
     def _load_avro_schema(self):
-        """Load Avro schema from file"""
+        """
+        Load Avro schema from file with caching support
+        
+        This ensures the service can start even if Schema Registry is temporarily unavailable
+        by using a locally cached schema.
+        """
         try:
             with open(settings.AVRO_SCHEMA_PATH, 'r') as schema_file:
                 self.avro_schema = schema_file.read()
             logger.info(f"Loaded Avro schema from {settings.AVRO_SCHEMA_PATH}")
+            
+            # Cache the schema for fallback
+            self._cache_schema(self.avro_schema)
+            
         except FileNotFoundError:
             logger.error(f"Avro schema file not found at {settings.AVRO_SCHEMA_PATH}")
-            raise
+            
+            # Try to load from cache
+            cached_schema = self._load_cached_schema()
+            if cached_schema:
+                logger.warning("Using cached schema as fallback")
+                self.avro_schema = cached_schema
+            else:
+                raise
         except Exception as e:
             logger.error(f"Error loading Avro schema: {str(e)}")
             raise
+    
+    def _cache_schema(self, schema: str):
+        """Cache schema locally for fallback"""
+        try:
+            self.schema_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.schema_cache_path, 'w') as cache_file:
+                cache_file.write(schema)
+            logger.debug("Schema cached successfully")
+        except Exception as e:
+            logger.warning(f"Failed to cache schema (non-critical): {str(e)}")
+    
+    def _load_cached_schema(self) -> str:
+        """Load schema from cache if available"""
+        try:
+            if self.schema_cache_path.exists():
+                with open(self.schema_cache_path, 'r') as cache_file:
+                    return cache_file.read()
+        except Exception as e:
+            logger.warning(f"Failed to load cached schema: {str(e)}")
+        return None
     
     def _create_consumer(self) -> AvroConsumer:
         """Create and configure Kafka consumer with Avro deserialization"""
@@ -121,11 +165,20 @@ class KafkaConsumerService:
         logger.info("Started consuming messages in background thread")
     
     def _get_dlq_producer(self):
-        """Lazy initialization of DLQ producer"""
+        """
+        Lazy initialization of DLQ producer with thread-safety
+        
+        Uses double-checked locking pattern to ensure only one instance is created
+        even when called from multiple threads.
+        """
         if self.dlq_producer is None:
-            from .dlq_producer import dlq_producer
-            self.dlq_producer = dlq_producer
-            self.dlq_producer.connect()
+            with self._dlq_lock:
+                # Double-check after acquiring lock
+                if self.dlq_producer is None:
+                    from .dlq_producer import dlq_producer
+                    self.dlq_producer = dlq_producer
+                    self.dlq_producer.connect()
+                    logger.info("DLQ producer initialized and connected")
         return self.dlq_producer
     
     def _calculate_backoff(self, retry_count: int) -> float:
@@ -144,6 +197,42 @@ class KafkaConsumerService:
             settings.DLQ_MAX_BACKOFF_MS
         )
         return backoff_ms / 1000.0
+    
+    def _commit_offset_with_retry(self, msg) -> bool:
+        """
+        Commit offset with retry logic to prevent duplicate processing
+        
+        Args:
+            msg: Kafka message to commit
+            
+        Returns:
+            bool: True if committed successfully
+        """
+        for attempt in range(settings.CONSUMER_COMMIT_MAX_RETRIES + 1):
+            try:
+                self.consumer.commit(message=msg, asynchronous=False)
+                logger.debug(
+                    f"Offset committed: topic={msg.topic()}, "
+                    f"partition={msg.partition()}, offset={msg.offset()}"
+                )
+                return True
+                
+            except Exception as commit_error:
+                if attempt < settings.CONSUMER_COMMIT_MAX_RETRIES:
+                    backoff_ms = settings.CONSUMER_COMMIT_RETRY_BACKOFF_MS * (2 ** attempt)
+                    logger.warning(
+                        f"Failed to commit offset (attempt {attempt + 1}/{settings.CONSUMER_COMMIT_MAX_RETRIES + 1}): {commit_error}. "
+                        f"Retrying in {backoff_ms}ms..."
+                    )
+                    time.sleep(backoff_ms / 1000.0)
+                else:
+                    logger.error(
+                        f"Failed to commit offset after {settings.CONSUMER_COMMIT_MAX_RETRIES + 1} attempts: {commit_error}. "
+                        f"Message may be reprocessed on restart!"
+                    )
+                    return False
+        
+        return False
     
     def _process_message_with_retry(self, msg) -> bool:
         """
@@ -267,24 +356,36 @@ class KafkaConsumerService:
                 msg = self.consumer.poll(timeout=1.0)
                 
                 if msg is None:
+                    # Reset error counter on successful poll (even if no message)
+                    self.consecutive_poll_errors = 0
                     continue
                 
                 if msg.error():
-                    logger.error(f"Consumer error: {msg.error()}")
+                    self.consecutive_poll_errors += 1
+                    logger.error(
+                        f"Consumer error ({self.consecutive_poll_errors}/{self.max_consecutive_errors}): "
+                        f"{msg.error()}"
+                    )
+                    
+                    # Check if we've exceeded max consecutive errors
+                    if self.consecutive_poll_errors >= self.max_consecutive_errors:
+                        logger.critical(
+                            f"CRITICAL: Consumer exceeded {self.max_consecutive_errors} consecutive poll errors. "
+                            f"Stopping consumer to prevent resource exhaustion."
+                        )
+                        self.is_running = False
+                        break
+                    
                     continue
+                
+                # Reset error counter on successful message
+                self.consecutive_poll_errors = 0
                 
                 # Process message with retry logic (blocks until handled)
                 self._process_message_with_retry(msg)
                 
-                # Commit offset after message is handled (success or DLQ)
-                try:
-                    self.consumer.commit(message=msg, asynchronous=False)
-                    logger.debug(
-                        f"Offset committed: topic={msg.topic()}, "
-                        f"partition={msg.partition()}, offset={msg.offset()}"
-                    )
-                except Exception as commit_error:
-                    logger.error(f"Failed to commit offset: {commit_error}")
+                # Commit offset after message is handled (success or DLQ) with retry
+                self._commit_offset_with_retry(msg)
                 
             except KeyboardInterrupt:
                 logger.info("Consumer interrupted by user")

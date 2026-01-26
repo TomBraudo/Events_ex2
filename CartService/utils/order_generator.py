@@ -83,12 +83,33 @@ class OrderGenerator:
             
         Returns:
             Complete order dictionary
+            
+        Raises:
+            ValueError: If order_id is empty or num_items is invalid
+            TypeError: If parameters have wrong types
         """
+        # Validate order_id
+        if not isinstance(order_id, str):
+            raise TypeError(f"order_id must be a string, got {type(order_id).__name__}")
+        
+        if not order_id or not order_id.strip():
+            raise ValueError("order_id cannot be empty or whitespace")
+        
+        # Validate num_items
+        if not isinstance(num_items, int):
+            raise TypeError(f"num_items must be an integer, got {type(num_items).__name__}")
+        
+        if num_items < 1:
+            raise ValueError(f"num_items must be at least 1, got {num_items}")
+        
+        if num_items > 100:
+            raise ValueError(f"num_items cannot exceed 100, got {num_items}")
+        
         items = OrderGenerator.generate_items(num_items)
         total_amount = OrderGenerator.calculate_total_amount(items)
         
         order = {
-            "orderId": order_id,
+            "orderId": order_id.strip(),
             "customerId": OrderGenerator.generate_customer_id(),
             "orderDate": OrderGenerator.generate_order_date(),
             "items": items,

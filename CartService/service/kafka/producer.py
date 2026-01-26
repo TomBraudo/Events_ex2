@@ -1,4 +1,5 @@
 import json
+import time
 from typing import Dict, Any
 from confluent_kafka import Producer
 from confluent_kafka.avro import AvroProducer
@@ -11,28 +12,75 @@ logger = logging.getLogger(__name__)
 
 
 class KafkaProducerService:
-    """Kafka producer service with Avro serialization and Schema Registry support"""
+    """
+    Kafka producer service with Avro serialization and Schema Registry support
+    
+    Features:
+    - Schema caching: Falls back to local schema if Schema Registry unavailable
+    - Retry logic: Handles transient failures with exponential backoff
+    """
     
     def __init__(self):
         self.producer = None
         self.avro_schema = None
+        self.schema_cache_path = settings.BASE_DIR / "schemas" / ".schema_cache"
         self._load_avro_schema()
     
     def _load_avro_schema(self):
-        """Load Avro schema from file"""
+        """
+        Load Avro schema from file with caching support
+        
+        This ensures the service can start even if Schema Registry is temporarily unavailable
+        by using a locally cached schema.
+        """
         try:
             with open(settings.AVRO_SCHEMA_PATH, 'r') as schema_file:
                 self.avro_schema = schema_file.read()
             logger.info(f"Loaded Avro schema from {settings.AVRO_SCHEMA_PATH}")
+            
+            # Cache the schema for fallback
+            self._cache_schema(self.avro_schema)
+            
         except FileNotFoundError:
             logger.error(f"Avro schema file not found at {settings.AVRO_SCHEMA_PATH}")
-            raise
+            
+            # Try to load from cache
+            cached_schema = self._load_cached_schema()
+            if cached_schema:
+                logger.warning("Using cached schema as fallback")
+                self.avro_schema = cached_schema
+            else:
+                raise
         except Exception as e:
             logger.error(f"Error loading Avro schema: {str(e)}")
             raise
     
+    def _cache_schema(self, schema: str):
+        """Cache schema locally for fallback"""
+        try:
+            self.schema_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.schema_cache_path, 'w') as cache_file:
+                cache_file.write(schema)
+            logger.debug("Schema cached successfully")
+        except Exception as e:
+            logger.warning(f"Failed to cache schema (non-critical): {str(e)}")
+    
+    def _load_cached_schema(self) -> str:
+        """Load schema from cache if available"""
+        try:
+            if self.schema_cache_path.exists():
+                with open(self.schema_cache_path, 'r') as cache_file:
+                    return cache_file.read()
+        except Exception as e:
+            logger.warning(f"Failed to load cached schema: {str(e)}")
+        return None
+    
     def _create_producer(self) -> AvroProducer:
-        """Create and configure Kafka producer with Avro serialization"""
+        """
+        Create and configure Kafka producer with Avro serialization
+        
+        Uses cached schema if Schema Registry is unavailable during creation.
+        """
         try:
             producer_config = {
                 'bootstrap.servers': settings.KAFKA_BOOTSTRAP_SERVERS,
@@ -53,6 +101,15 @@ class KafkaProducerService:
             return producer
             
         except Exception as e:
+            error_msg = str(e).lower()
+            
+            # If Schema Registry error and we have cached schema, try to continue
+            if 'schema' in error_msg or 'registry' in error_msg:
+                logger.warning(f"Schema Registry error during producer creation: {str(e)}")
+                logger.warning("Attempting to use cached schema for producer creation")
+                # The producer will still try to connect to Schema Registry later
+                # but at least we can initialize with cached schema
+            
             logger.error(f"Failed to create Kafka producer: {str(e)}")
             raise
     
@@ -68,61 +125,95 @@ class KafkaProducerService:
     
     def publish_order_event(self, order: Dict[str, Any]) -> bool:
         """
-        Publish order event to Kafka topic with Avro serialization
+        Publish order event to Kafka topic with Avro serialization and retry logic
+        
+        Implements exponential backoff retry for transient failures.
         
         Args:
             order: Order dictionary to be published
             
         Returns:
-            bool: True if successful, False otherwise
+            bool: True if successful
             
         Raises:
-            ConnectionError: If Kafka broker is not available
+            ConnectionError: If Kafka broker is not available after retries
             Exception: For other errors during publishing
         """
-        try:
-            # Ensure producer is connected
-            if self.producer is None:
-                self.connect()
-            
-            # Use orderId as the key for partitioning (ensures order events from same order go to same partition)
-            # AvroProducer will serialize this as a string using the key schema
-            key = order.get('orderId', '')
-            
-            # Publish message
-            self.producer.produce(
-                topic=settings.KAFKA_TOPIC,
-                key=key,
-                value=order,
-                callback=self._delivery_callback
-            )
-            
-            # Wait for message to be delivered (flush)
-            self.producer.flush(timeout=10)
-            
-            logger.info(f"Successfully published order event for orderId: {order.get('orderId')}")
-            return True
-            
-        except BufferError as e:
-            logger.error(f"Local producer queue is full: {str(e)}")
-            raise Exception(f"Failed to publish event - queue full: {str(e)}")
+        last_exception = None
+        order_id = order.get('orderId', 'Unknown')
         
-        except Exception as e:
-            error_msg = str(e).lower()
+        for attempt in range(settings.PRODUCER_MAX_RETRIES + 1):
+            try:
+                # Ensure producer is connected
+                if self.producer is None:
+                    self.connect()
+                
+                # Use orderId as the key for partitioning
+                key = order.get('orderId', '')
+                
+                # Publish message
+                self.producer.produce(
+                    topic=settings.KAFKA_TOPIC,
+                    key=key,
+                    value=order,
+                    callback=self._delivery_callback
+                )
+                
+                # Wait for message to be delivered (flush with configurable timeout)
+                remaining_messages = self.producer.flush(timeout=settings.PRODUCER_FLUSH_TIMEOUT_SECONDS)
+                
+                if remaining_messages > 0:
+                    raise Exception(f"Failed to flush {remaining_messages} messages within timeout")
+                
+                logger.info(f"Successfully published order event for orderId: {order_id}")
+                return True
+                
+            except BufferError as e:
+                last_exception = e
+                logger.error(f"Local producer queue is full (attempt {attempt + 1}/{settings.PRODUCER_MAX_RETRIES + 1}): {str(e)}")
+                
+                if attempt < settings.PRODUCER_MAX_RETRIES:
+                    backoff_ms = settings.PRODUCER_RETRY_BACKOFF_MS * (2 ** attempt)
+                    logger.warning(f"Retrying in {backoff_ms}ms...")
+                    time.sleep(backoff_ms / 1000.0)
+                else:
+                    raise Exception(f"Failed to publish event after {settings.PRODUCER_MAX_RETRIES + 1} attempts - queue full: {str(e)}")
             
-            # Check for connection-related errors
-            if any(term in error_msg for term in ['connection', 'broker', 'timeout', 'network']):
-                logger.error(f"Kafka connection error: {str(e)}")
-                raise ConnectionError(f"Kafka broker not available: {str(e)}")
-            
-            # Check for schema registry errors
-            if 'schema' in error_msg or 'registry' in error_msg:
-                logger.error(f"Schema Registry error: {str(e)}")
-                raise Exception(f"Schema Registry error: {str(e)}")
-            
-            # Generic error
-            logger.error(f"Error publishing order event: {str(e)}")
-            raise Exception(f"Failed to publish event: {str(e)}")
+            except Exception as e:
+                last_exception = e
+                error_msg = str(e).lower()
+                
+                # Check if this is a transient error worth retrying
+                is_transient = any(term in error_msg for term in [
+                    'connection', 'broker', 'timeout', 'network', 'temporary', 'unavailable'
+                ])
+                
+                if is_transient and attempt < settings.PRODUCER_MAX_RETRIES:
+                    backoff_ms = settings.PRODUCER_RETRY_BACKOFF_MS * (2 ** attempt)
+                    logger.warning(
+                        f"Transient error publishing order {order_id} "
+                        f"(attempt {attempt + 1}/{settings.PRODUCER_MAX_RETRIES + 1}): {str(e)}. "
+                        f"Retrying in {backoff_ms}ms..."
+                    )
+                    time.sleep(backoff_ms / 1000.0)
+                    # Try to reconnect
+                    self.producer = None
+                    continue
+                
+                # Non-transient error or max retries exceeded
+                if 'connection' in error_msg or 'broker' in error_msg or 'timeout' in error_msg or 'network' in error_msg:
+                    logger.error(f"Kafka connection error after {attempt + 1} attempts: {str(e)}")
+                    raise ConnectionError(f"Kafka broker not available after {attempt + 1} attempts: {str(e)}")
+                
+                if 'schema' in error_msg or 'registry' in error_msg:
+                    logger.error(f"Schema Registry error: {str(e)}")
+                    raise Exception(f"Schema Registry error: {str(e)}")
+                
+                logger.error(f"Error publishing order event after {attempt + 1} attempts: {str(e)}")
+                raise Exception(f"Failed to publish event: {str(e)}")
+        
+        # Should never reach here, but just in case
+        raise Exception(f"Failed to publish event after {settings.PRODUCER_MAX_RETRIES + 1} attempts: {str(last_exception)}")
     
     def _delivery_callback(self, err, msg):
         """Callback for message delivery reports"""

@@ -15,11 +15,23 @@ class OrderStorage:
         
         Args:
             order: Order dictionary with orderId field
+            
+        Raises:
+            ValueError: If order is invalid or missing orderId
+            TypeError: If order is not a dictionary
         """
+        if not isinstance(order, dict):
+            raise TypeError(f"Order must be a dictionary, got {type(order).__name__}")
+        
+        order_id = order.get("orderId")
+        if not order_id:
+            raise ValueError("Order must have 'orderId' field")
+        
+        if not isinstance(order_id, str) or not order_id.strip():
+            raise ValueError(f"orderId must be a non-empty string, got: {order_id}")
+        
         with self._lock:
-            order_id = order.get("orderId")
-            if order_id:
-                self._orders[order_id] = order
+            self._orders[order_id] = order
     
     def get_order(self, order_id: str) -> Optional[Dict[str, Any]]:
         """

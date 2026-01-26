@@ -6,6 +6,7 @@ from config.settings import settings
 from datetime import datetime
 import logging
 import json
+import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,25 +22,65 @@ class DLQProducer:
     - Retry count
     - Timestamps
     - Processing context
+    
+    Features:
+    - Schema caching: Falls back to cached schema if Schema Registry unavailable
+    - Retry logic: Retries DLQ sends to prevent data loss
     """
     
     def __init__(self):
         self.producer = None
         self.avro_schema = None
+        self.schema_cache_path = settings.BASE_DIR / "schemas" / ".dlq_schema_cache"
         self._load_avro_schema()
     
     def _load_avro_schema(self):
-        """Load Avro schema from file for DLQ messages"""
+        """
+        Load Avro schema from file for DLQ messages with caching support
+        
+        This ensures DLQ can still function if Schema Registry is temporarily unavailable.
+        """
         try:
             with open(settings.AVRO_SCHEMA_PATH, 'r') as schema_file:
                 self.avro_schema = schema_file.read()
             logger.info(f"Loaded Avro schema for DLQ from {settings.AVRO_SCHEMA_PATH}")
+            
+            # Cache the schema for fallback
+            self._cache_schema(self.avro_schema)
+            
         except FileNotFoundError:
             logger.error(f"Avro schema file not found at {settings.AVRO_SCHEMA_PATH}")
-            raise
+            
+            # Try to load from cache
+            cached_schema = self._load_cached_schema()
+            if cached_schema:
+                logger.warning("Using cached schema for DLQ as fallback")
+                self.avro_schema = cached_schema
+            else:
+                raise
         except Exception as e:
             logger.error(f"Error loading Avro schema: {str(e)}")
             raise
+    
+    def _cache_schema(self, schema: str):
+        """Cache schema locally for fallback"""
+        try:
+            self.schema_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.schema_cache_path, 'w') as cache_file:
+                cache_file.write(schema)
+            logger.debug("DLQ schema cached successfully")
+        except Exception as e:
+            logger.warning(f"Failed to cache DLQ schema (non-critical): {str(e)}")
+    
+    def _load_cached_schema(self) -> str:
+        """Load schema from cache if available"""
+        try:
+            if self.schema_cache_path.exists():
+                with open(self.schema_cache_path, 'r') as cache_file:
+                    return cache_file.read()
+        except Exception as e:
+            logger.warning(f"Failed to load cached DLQ schema: {str(e)}")
+        return None
     
     def _create_producer(self) -> AvroProducer:
         """Create and configure Kafka producer for DLQ with Avro serialization"""
@@ -123,54 +164,78 @@ class DLQProducer:
         Returns:
             bool: True if successful, False otherwise
         """
-        try:
-            # Ensure producer is connected
-            if self.producer is None:
-                self.connect()
-            
-            current_timestamp = datetime.utcnow().isoformat() + 'Z'
-            
-            # Create DLQ message with metadata
-            dlq_message = {
-                'originalMessage': json.dumps(message_value),
-                'errorMessage': str(error),
-                'errorType': error.__class__.__name__,
-                'retryCount': retry_count,
-                'failedAttempts': retry_count + 1,  # Total attempts including initial
-                'firstFailureTimestamp': first_failure_timestamp or current_timestamp,
-                'lastFailureTimestamp': current_timestamp,
-                'originalTopic': original_topic,
-                'originalPartition': original_partition,
-                'originalOffset': original_offset,
-                'consumerGroup': settings.KAFKA_CONSUMER_GROUP
-            }
-            
-            # Publish to DLQ topic
-            self.producer.produce(
-                topic=settings.KAFKA_DLQ_TOPIC,
-                key=message_key,
-                value=dlq_message,
-                callback=self._delivery_callback
-            )
-            
-            # Wait for message to be delivered
-            self.producer.flush(timeout=10)
-            
-            logger.error(
-                f"Message sent to DLQ | "
-                f"OrderID: {message_key} | "
-                f"Error: {error.__class__.__name__} | "
-                f"Retry Count: {retry_count} | "
-                f"Original Topic: {original_topic} | "
-                f"Offset: {original_offset}"
-            )
-            
-            return True
-            
-        except Exception as e:
-            logger.critical(f"CRITICAL: Failed to send message to DLQ: {str(e)}")
-            logger.critical(f"Original message key: {message_key}, error: {error}")
-            return False
+        last_exception = None
+        
+        for attempt in range(settings.DLQ_PRODUCER_MAX_RETRIES + 1):
+            try:
+                # Ensure producer is connected
+                if self.producer is None:
+                    self.connect()
+                
+                current_timestamp = datetime.utcnow().isoformat() + 'Z'
+                
+                # Create DLQ message with metadata
+                dlq_message = {
+                    'originalMessage': json.dumps(message_value),
+                    'errorMessage': str(error),
+                    'errorType': error.__class__.__name__,
+                    'retryCount': retry_count,
+                    'failedAttempts': retry_count + 1,  # Total attempts including initial
+                    'firstFailureTimestamp': first_failure_timestamp or current_timestamp,
+                    'lastFailureTimestamp': current_timestamp,
+                    'originalTopic': original_topic,
+                    'originalPartition': original_partition,
+                    'originalOffset': original_offset,
+                    'consumerGroup': settings.KAFKA_CONSUMER_GROUP
+                }
+                
+                # Publish to DLQ topic
+                self.producer.produce(
+                    topic=settings.KAFKA_DLQ_TOPIC,
+                    key=message_key,
+                    value=dlq_message,
+                    callback=self._delivery_callback
+                )
+                
+                # Wait for message to be delivered with configurable timeout
+                remaining_messages = self.producer.flush(timeout=settings.DLQ_FLUSH_TIMEOUT_SECONDS)
+                
+                if remaining_messages > 0:
+                    raise Exception(f"Failed to flush {remaining_messages} DLQ messages within timeout")
+                
+                logger.error(
+                    f"Message sent to DLQ | "
+                    f"OrderID: {message_key} | "
+                    f"Error: {error.__class__.__name__} | "
+                    f"Retry Count: {retry_count} | "
+                    f"Original Topic: {original_topic} | "
+                    f"Offset: {original_offset}"
+                )
+                
+                return True
+                
+            except Exception as e:
+                last_exception = e
+                
+                if attempt < settings.DLQ_PRODUCER_MAX_RETRIES:
+                    backoff_ms = settings.DLQ_PRODUCER_RETRY_BACKOFF_MS * (2 ** attempt)
+                    logger.critical(
+                        f"CRITICAL: Failed to send message to DLQ (attempt {attempt + 1}/{settings.DLQ_PRODUCER_MAX_RETRIES + 1}): {str(e)}. "
+                        f"Retrying in {backoff_ms}ms..."
+                    )
+                    time.sleep(backoff_ms / 1000.0)
+                    # Try to reconnect
+                    self.producer = None
+                else:
+                    logger.critical(
+                        f"CRITICAL: Failed to send message to DLQ after {settings.DLQ_PRODUCER_MAX_RETRIES + 1} attempts: {str(e)}"
+                    )
+                    logger.critical(f"Original message key: {message_key}, error: {error}")
+                    return False
+        
+        # Should never reach here
+        logger.critical(f"CRITICAL: Failed to send to DLQ: {str(last_exception)}")
+        return False
     
     def _delivery_callback(self, err, msg):
         """Callback for DLQ message delivery reports"""

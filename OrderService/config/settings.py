@@ -45,6 +45,18 @@ class Settings:
         'compression.type': 'gzip',
     }
     
+    # DLQ Producer Retry Configuration
+    DLQ_PRODUCER_MAX_RETRIES: int = int(os.getenv("DLQ_PRODUCER_MAX_RETRIES", "3"))
+    DLQ_PRODUCER_RETRY_BACKOFF_MS: int = int(os.getenv("DLQ_PRODUCER_RETRY_BACKOFF_MS", "1000"))
+    DLQ_FLUSH_TIMEOUT_SECONDS: int = int(os.getenv("DLQ_FLUSH_TIMEOUT_SECONDS", "10"))
+    
+    # Consumer Commit Retry Configuration
+    CONSUMER_COMMIT_MAX_RETRIES: int = int(os.getenv("CONSUMER_COMMIT_MAX_RETRIES", "3"))
+    CONSUMER_COMMIT_RETRY_BACKOFF_MS: int = int(os.getenv("CONSUMER_COMMIT_RETRY_BACKOFF_MS", "500"))
+    
+    # Consumer Error Tracking
+    CONSUMER_MAX_CONSECUTIVE_ERRORS: int = int(os.getenv("CONSUMER_MAX_CONSECUTIVE_ERRORS", "10"))
+    
     # Business Logic Settings
     SHIPPING_COST_PERCENTAGE: float = 0.02  # 2% of totalAmount
     

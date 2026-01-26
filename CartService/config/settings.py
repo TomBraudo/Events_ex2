@@ -29,6 +29,11 @@ class Settings:
         'enable.idempotence': True,  # Prevent duplicates
     }
     
+    # Producer Retry Configuration (application-level retries)
+    PRODUCER_MAX_RETRIES: int = int(os.getenv("PRODUCER_MAX_RETRIES", "3"))
+    PRODUCER_RETRY_BACKOFF_MS: int = int(os.getenv("PRODUCER_RETRY_BACKOFF_MS", "1000"))
+    PRODUCER_FLUSH_TIMEOUT_SECONDS: int = int(os.getenv("PRODUCER_FLUSH_TIMEOUT_SECONDS", "10"))
+    
     # API Settings
     API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
     API_PORT: int = int(os.getenv("API_PORT", "8000"))
