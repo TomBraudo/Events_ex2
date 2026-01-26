@@ -2,7 +2,7 @@ import random
 import string
 from datetime import datetime
 from typing import List, Dict, Any
-from models import OrderItem, OrderStatus
+from models import OrderItem
 
 
 class OrderGenerator:
@@ -33,9 +33,9 @@ class OrderGenerator:
         return random.choice(OrderGenerator.CURRENCIES)
     
     @staticmethod
-    def generate_initial_status() -> OrderStatus:
+    def generate_initial_status() -> str:
         """Generate initial order status (always 'pending' for new orders)"""
-        return OrderStatus.PENDING
+        return "pending"
     
     @staticmethod
     def generate_items(num_items: int) -> List[Dict[str, Any]]:
@@ -94,7 +94,7 @@ class OrderGenerator:
             "items": items,
             "totalAmount": total_amount,
             "currency": OrderGenerator.generate_currency(),
-            "status": OrderGenerator.generate_initial_status().value
+            "status": OrderGenerator.generate_initial_status()
         }
         
         return order

@@ -1,7 +1,6 @@
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 from business.order import OrderService
-from models import OrderStatus
 from typing import Dict, Any
 import logging
 
@@ -16,7 +15,7 @@ order_service = OrderService()
 class CreateOrderRequest(BaseModel):
     """Request model for creating an order"""
     orderId: str = Field(..., min_length=1, description="Unique identifier for the order")
-    numItems: int = Field(..., ge=1, description="Number of items to generate (must be >= 1)")
+    numItems: int = Field(..., ge=1, le=100, description="Number of items to generate (1-100)")
     
     @field_validator('orderId')
     @classmethod
@@ -167,12 +166,11 @@ async def create_order(request: CreateOrderRequest):
 )
 async def update_order(request: UpdateOrderRequest):
     """
-    Update an existing order's status
+    Update an existing order's status.
     
-    This endpoint receives orderId and status, validates them,
-    updates the order in storage, and publishes the update event to Kafka.
-    
-    Valid statuses: pending, confirmed, shipped, delivered, cancelled
+    This endpoint receives orderId and status, validates them (status can be any
+    non-empty string), updates the order in storage, and publishes the update
+    event to Kafka.
     """
     try:
         logger.info(f"Received update order request: orderId={request.orderId}, status={request.status}")

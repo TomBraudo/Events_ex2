@@ -1,5 +1,5 @@
 from typing import Dict, Any
-from models import Order, OrderStatus
+from models import Order
 from utils.order_generator import OrderGenerator
 from utils.order_storage import order_storage
 from service.kafka import KafkaProducerService
@@ -86,12 +86,10 @@ class OrderService:
         if not order:
             raise ValueError(f"Order with ID '{order_id}' not found")
         
-        # Validate new status
-        try:
-            status_enum = OrderStatus(new_status)
-        except ValueError:
-            valid_statuses = [s.value for s in OrderStatus]
-            raise ValueError(f"Invalid status '{new_status}'. Valid statuses: {valid_statuses}")
+        # Validate new status (allow any non-empty string)
+        if not new_status or not new_status.strip():
+            raise ValueError("Status cannot be empty or whitespace")
+        new_status = new_status.strip()
         
         # Update status in storage
         old_status = order.get("status")

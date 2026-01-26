@@ -1,17 +1,7 @@
 from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import List
-from enum import Enum
 from datetime import datetime
 from decimal import Decimal
-
-
-class OrderStatus(str, Enum):
-    """Enum for valid order statuses"""
-    PENDING = "pending"
-    CONFIRMED = "confirmed"
-    SHIPPED = "shipped"
-    DELIVERED = "delivered"
-    CANCELLED = "cancelled"
 
 
 class OrderItem(BaseModel):
@@ -45,7 +35,7 @@ class Order(BaseModel):
     items: List[OrderItem] = Field(..., min_length=1, description="Array of order items (cannot be empty)")
     totalAmount: float = Field(..., gt=0, description="Total cost of the order (must be > 0)")
     currency: str = Field(..., min_length=3, max_length=3, description="Currency code (3-letter, e.g., USD, EUR)")
-    status: OrderStatus = Field(..., description="Status of the order")
+    status: str = Field(..., min_length=1, description="Status of the order (any non-empty string)")
 
     @field_validator('orderId', 'customerId')
     @classmethod
@@ -74,6 +64,14 @@ class Order(BaseModel):
         if not v.isalpha():
             raise ValueError('currency must contain only letters')
         return v.upper()
+
+    @field_validator('status')
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        """Validate status is not empty after stripping whitespace"""
+        if not v or not v.strip():
+            raise ValueError('status cannot be empty or whitespace')
+        return v.strip()
 
     @field_validator('items')
     @classmethod

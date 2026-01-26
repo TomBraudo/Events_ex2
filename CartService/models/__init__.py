@@ -1,4 +1,4 @@
-from .order import Order, OrderItem, OrderStatus
+from .order import Order, OrderItem
 
-__all__ = ["Order", "OrderItem", "OrderStatus"]
+__all__ = ["Order", "OrderItem"]
 
