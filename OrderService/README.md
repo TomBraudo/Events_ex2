@@ -5,10 +5,12 @@ A consumer microservice that listens to Kafka order events, processes them, calc
 ## 🚀 Features
 
 - ✅ **Kafka Consumer** with Avro deserialization
+- ✅ **Dead Letter Queue (DLQ)** with automatic retry and exponential backoff
+- ✅ **Manual Offset Management** - Zero data loss guarantee
 - ✅ **Background Event Processing** (threaded consumer)
 - ✅ **Schema Registry Integration** for type-safe deserialization
 - ✅ **Automatic Shipping Cost Calculation** (2% of totalAmount)
-- ✅ **RESTful API** for order retrieval
+- ✅ **RESTful API** for order retrieval and DLQ monitoring
 - ✅ **In-Memory Storage** for processed orders
 - ✅ **Layered Architecture** (API, Business, Service)
 
@@ -19,7 +21,7 @@ OrderService/
 ├── api/
 │   └── controllers/
 │       ├── __init__.py
-│       └── order_controller.py       # API endpoints
+│       └── order_controller.py       # API endpoints + DLQ monitoring
 ├── business/
 │   └── order/
 │       ├── __init__.py
@@ -27,7 +29,8 @@ OrderService/
 ├── service/
 │   └── kafka/
 │       ├── __init__.py
-│       └── consumer.py               # Kafka consumer with Avro
+│       ├── consumer.py               # Kafka consumer with DLQ support
+│       └── dlq_producer.py           # Dead Letter Queue producer
 ├── models/
 │   ├── __init__.py
 │   └── order.py                      # Pydantic models
@@ -36,10 +39,13 @@ OrderService/
 │   └── order_storage.py              # In-memory storage
 ├── config/
 │   ├── __init__.py
-│   └── settings.py                   # Configuration
+│   └── settings.py                   # Configuration (including DLQ)
 ├── schemas/
 │   └── order.avsc                    # Avro schema (matches producer)
+├── tests/
+│   └── test_dlq.py                   # DLQ unit tests
 ├── main.py                           # FastAPI application
+├── DLQ_README.md                     # DLQ documentation
 ├── requirements.txt
 └── Dockerfile
 ```
@@ -179,6 +185,66 @@ curl "http://localhost:8001/api/stats"
 }
 ```
 
+### 4. GET `/api/dlq/info`
+
+Get Dead Letter Queue configuration and current retry statistics.
+
+**Example Request:**
+```bash
+curl "http://localhost:8001/api/dlq/info"
+```
+
+**Example Response:**
+```json
+{
+  "success": true,
+  "dlqConfig": {
+    "dlqTopic": "order-events-dlq",
+    "maxRetries": 3,
+    "initialBackoffMs": 1000,
+    "maxBackoffMs": 30000
+  },
+  "consumerStats": {
+    "isRunning": true,
+    "messagesInRetry": 2,
+    "retryTrackerDetails": [...]
+  }
+}
+```
+
+### 5. GET `/api/dlq/messages`
+
+Retrieve all messages from the Dead Letter Queue.
+
+**Example Request:**
+```bash
+curl "http://localhost:8001/api/dlq/messages"
+```
+
+**Example Response:**
+```json
+{
+  "success": true,
+  "dlqTopic": "order-events-dlq",
+  "messageCount": 5,
+  "messages": [
+    {
+      "originalMessage": "{...}",
+      "errorMessage": "Validation failed",
+      "errorType": "ValueError",
+      "retryCount": 3,
+      "failedAttempts": 4,
+      "firstFailureTimestamp": "2026-01-26T10:00:00Z",
+      "lastFailureTimestamp": "2026-01-26T10:00:15Z",
+      "originalTopic": "order-events",
+      "originalPartition": 0,
+      "originalOffset": 12345,
+      "consumerGroup": "order-service-group"
+    }
+  ]
+}
+```
+
 ### Health Endpoints
 
 - `GET /` - Root endpoint with service info
@@ -274,6 +340,10 @@ Environment variables (set in `docker-compose.yml`):
 | `SCHEMA_REGISTRY_URL` | `http://localhost:8081` | Schema Registry URL |
 | `KAFKA_TOPIC` | `order-events` | Topic to consume from |
 | `KAFKA_CONSUMER_GROUP` | `order-service-group` | Consumer group ID |
+| `KAFKA_DLQ_TOPIC` | `order-events-dlq` | Dead Letter Queue topic |
+| `DLQ_MAX_RETRIES` | `3` | Max retry attempts before DLQ |
+| `DLQ_RETRY_BACKOFF_MS` | `1000` | Initial retry backoff (ms) |
+| `DLQ_MAX_BACKOFF_MS` | `30000` | Maximum retry backoff (ms) |
 | `API_HOST` | `0.0.0.0` | API host |
 | `API_PORT` | `8001` | API port |
 
@@ -318,8 +388,22 @@ shippingCost = totalAmount * 0.02  # 2% of order total
 
 - **Group ID**: `order-service-group`
 - **Auto Offset Reset**: `earliest` (reads all messages from beginning)
-- **Auto Commit**: Enabled
+- **Auto Commit**: **Disabled** (manual offset management for DLQ)
 - **Max Poll Interval**: 300 seconds
+- **DLQ Topic**: `order-events-dlq`
+- **Retry Strategy**: Exponential backoff (1s, 2s, 4s, 8s, ...)
+
+### Dead Letter Queue (DLQ)
+
+The consumer implements a robust DLQ pattern:
+
+1. **Automatic Retries**: Failed messages are retried with exponential backoff
+2. **Manual Offsets**: Offsets are only committed after successful processing or DLQ send
+3. **Zero Data Loss**: Failed messages are preserved in the DLQ topic
+4. **Rich Metadata**: DLQ messages include error details, retry count, and timestamps
+5. **Monitoring**: API endpoints provide DLQ visibility
+
+**See [DLQ_README.md](DLQ_README.md) for complete documentation.**
 
 ## 🐛 Troubleshooting
 

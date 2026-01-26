@@ -1,7 +1,6 @@
 from typing import Dict, Any
 from models import Order
 from utils.order_generator import OrderGenerator
-from utils.order_storage import order_storage
 from service.kafka import KafkaProducerService
 import logging
 
@@ -10,11 +9,10 @@ logger = logging.getLogger(__name__)
 
 
 class OrderService:
-    """Business logic for order management"""
+    """Business logic for order management - Producer only (no storage)"""
     
     def __init__(self):
         self.kafka_producer = KafkaProducerService()
-        self.storage = order_storage
     
     def create_order(self, order_id: str, num_items: int) -> Dict[str, Any]:
         """
@@ -32,10 +30,6 @@ class OrderService:
             ConnectionError: If Kafka broker is not available
             Exception: For other errors
         """
-        # Check if order already exists
-        if self.storage.order_exists(order_id):
-            raise ValueError(f"Order with ID '{order_id}' already exists")
-        
         # Generate order with auto-generated fields
         order_dict = OrderGenerator.generate_order(order_id, num_items)
         
@@ -47,17 +41,12 @@ class OrderService:
             logger.error(f"Order validation failed: {str(e)}")
             raise ValueError(f"Order validation failed: {str(e)}")
         
-        # Save to storage
-        self.storage.save_order(order_dict)
-        logger.info(f"Order saved to storage: {order_id}")
-        
-        # Publish to Kafka
+        # Publish to Kafka (CartService is producer-only, OrderService stores data)
         try:
             self.kafka_producer.publish_order_event(order_dict)
             logger.info(f"Order event published to Kafka: {order_id}")
         except ConnectionError as e:
-            # Remove from storage if Kafka publish fails
-            logger.error(f"Failed to publish to Kafka, rolling back: {str(e)}")
+            logger.error(f"Failed to publish to Kafka: {str(e)}")
             raise
         except Exception as e:
             logger.error(f"Error publishing to Kafka: {str(e)}")
@@ -69,52 +58,63 @@ class OrderService:
         """
         Update the status of an existing order
         
+        Note: CartService doesn't store orders. This publishes a status update event.
+        In a real system, you'd first retrieve the order from OrderService API.
+        
         Args:
             order_id: The order ID to update
             new_status: The new status value
             
         Returns:
-            The updated order dictionary
+            Status update event data
             
         Raises:
-            ValueError: If order not found or status is invalid
+            ValueError: If status is invalid
             ConnectionError: If Kafka broker is not available
             Exception: For other errors
         """
-        # Check if order exists
-        order = self.storage.get_order(order_id)
-        if not order:
-            raise ValueError(f"Order with ID '{order_id}' not found")
-        
-        # Validate new status (allow any non-empty string)
+        # Validate new status
         if not new_status or not new_status.strip():
             raise ValueError("Status cannot be empty or whitespace")
         new_status = new_status.strip()
         
-        # Update status in storage
-        old_status = order.get("status")
-        self.storage.update_order_status(order_id, new_status)
-        logger.info(f"Order status updated: {order_id} from '{old_status}' to '{new_status}'")
+        # Create a minimal status update event
+        # In production, you'd retrieve the full order from OrderService first
+        status_update_event = {
+            "orderId": order_id,
+            "status": new_status,
+            "updateType": "STATUS_CHANGE"
+        }
         
-        # Get updated order
-        updated_order = self.storage.get_order(order_id)
+        logger.info(f"Publishing status update event: {order_id} -> '{new_status}'")
         
-        # Publish update event to Kafka
+        # Publish status update to Kafka
         try:
-            self.kafka_producer.publish_order_event(updated_order)
-            logger.info(f"Order update event published to Kafka: {order_id}")
+            # Note: This is a simplified implementation
+            # Production systems would either:
+            # 1. Call OrderService API to get full order, update status, republish
+            # 2. Use a separate status-update topic with event sourcing
+            # 3. Implement CQRS pattern
+            
+            # For now, just log a warning
+            logger.warning(
+                f"Status update requested for {order_id}. "
+                f"CartService no longer stores orders. "
+                f"This endpoint is deprecated in event-driven architecture."
+            )
+            raise ValueError(
+                f"Status updates not supported. CartService is producer-only. "
+                f"To update an order, retrieve it from OrderService "
+                f"(GET http://localhost:8001/api/order-details?orderId={order_id}), "
+                f"then create a new order event with updated status."
+            )
+            
         except ConnectionError as e:
-            # Rollback status change if Kafka publish fails
-            self.storage.update_order_status(order_id, old_status)
-            logger.error(f"Failed to publish to Kafka, rolling back: {str(e)}")
+            logger.error(f"Failed to publish to Kafka: {str(e)}")
             raise
         except Exception as e:
-            # Rollback status change
-            self.storage.update_order_status(order_id, old_status)
-            logger.error(f"Error publishing to Kafka, rolling back: {str(e)}")
+            logger.error(f"Error: {str(e)}")
             raise
-        
-        return updated_order
 
 
 # Singleton instance

@@ -1,8 +1,9 @@
-from typing import Dict, Any, List, Optional, Callable
-from confluent_kafka import Consumer
+from typing import Dict, Any, List, Optional, Callable, Tuple
+from confluent_kafka import Consumer, TopicPartition
 from confluent_kafka.avro import AvroConsumer
 from confluent_kafka.avro import loads as avro_loads
 from config.settings import settings
+from datetime import datetime
 import logging
 import threading
 import time
@@ -12,7 +13,10 @@ logger = logging.getLogger(__name__)
 
 
 class KafkaConsumerService:
-    """Kafka consumer service with Avro deserialization and Schema Registry support"""
+    """
+    Kafka consumer service with Avro deserialization, Schema Registry support,
+    and Dead Letter Queue (DLQ) implementation
+    """
     
     def __init__(self):
         self.consumer: Optional[AvroConsumer] = None
@@ -20,6 +24,8 @@ class KafkaConsumerService:
         self.is_running = False
         self.consumer_thread: Optional[threading.Thread] = None
         self.message_handler: Optional[Callable] = None
+        self.dlq_producer = None  # Will be initialized on first use
+        
         self._load_avro_schema()
     
     def _load_avro_schema(self):
@@ -114,9 +120,146 @@ class KafkaConsumerService:
         self.consumer_thread.start()
         logger.info("Started consuming messages in background thread")
     
+    def _get_dlq_producer(self):
+        """Lazy initialization of DLQ producer"""
+        if self.dlq_producer is None:
+            from .dlq_producer import dlq_producer
+            self.dlq_producer = dlq_producer
+            self.dlq_producer.connect()
+        return self.dlq_producer
+    
+    def _calculate_backoff(self, retry_count: int) -> float:
+        """
+        Calculate exponential backoff delay in seconds
+        
+        Args:
+            retry_count: Current retry attempt number
+            
+        Returns:
+            Delay in seconds
+        """
+        # Exponential backoff: initial_backoff * (2 ^ retry_count)
+        backoff_ms = min(
+            settings.DLQ_RETRY_BACKOFF_MS * (2 ** retry_count),
+            settings.DLQ_MAX_BACKOFF_MS
+        )
+        return backoff_ms / 1000.0
+    
+    def _process_message_with_retry(self, msg) -> bool:
+        """
+        Process a message with retry logic and DLQ support
+        
+        This method retries the SAME message multiple times with exponential backoff
+        before sending to DLQ. It does NOT poll for new messages between retries.
+        
+        Args:
+            msg: Kafka message
+            
+        Returns:
+            bool: True if handled (success or sent to DLQ), False should never happen
+        """
+        order_data = msg.value()  # Already deserialized by AvroConsumer
+        
+        if not order_data:
+            logger.warning("Received empty message, skipping")
+            return True
+        
+        order_id = order_data.get('orderId', 'Unknown')
+        first_failure_timestamp = None
+        
+        # Retry loop - process the same message up to MAX_RETRIES + 1 times
+        for attempt in range(settings.DLQ_MAX_RETRIES + 1):
+            try:
+                logger.info(
+                    f"Processing order event: {order_id}, "
+                    f"status: {order_data.get('status')}, "
+                    f"attempt: {attempt + 1}/{settings.DLQ_MAX_RETRIES + 1}"
+                )
+                
+                # Call the message handler
+                if self.message_handler:
+                    self.message_handler(order_data)
+                
+                # Success!
+                if attempt > 0:
+                    logger.info(f"Order {order_id} processed successfully after {attempt} retries")
+                else:
+                    logger.info(f"Order {order_id} processed successfully")
+                
+                return True
+                
+            except Exception as e:
+                error_type = e.__class__.__name__
+                logger.error(
+                    f"Error processing order {order_id} (attempt {attempt + 1}): "
+                    f"{error_type}: {str(e)}"
+                )
+                
+                # Track first failure timestamp
+                if first_failure_timestamp is None:
+                    first_failure_timestamp = datetime.utcnow().isoformat() + 'Z'
+                
+                # Check if this was the last attempt
+                if attempt >= settings.DLQ_MAX_RETRIES:
+                    # Max retries exceeded - send to DLQ
+                    logger.error(
+                        f"Max retries ({settings.DLQ_MAX_RETRIES}) exceeded for order {order_id}. "
+                        f"Sending to DLQ..."
+                    )
+                    
+                    try:
+                        dlq_producer = self._get_dlq_producer()
+                        success = dlq_producer.send_to_dlq(
+                            message_value=order_data,
+                            message_key=order_id,
+                            error=e,
+                            retry_count=attempt,
+                            original_topic=msg.topic(),
+                            original_partition=msg.partition(),
+                            original_offset=msg.offset(),
+                            first_failure_timestamp=first_failure_timestamp
+                        )
+                        
+                        if success:
+                            logger.info(f"Order {order_id} successfully sent to DLQ")
+                            return True
+                        else:
+                            logger.critical(
+                                f"CRITICAL: Failed to send order {order_id} to DLQ. "
+                                f"Message will be lost!"
+                            )
+                            return True  # Commit anyway to avoid infinite loop
+                            
+                    except Exception as dlq_error:
+                        logger.critical(
+                            f"CRITICAL: Exception while sending to DLQ for order {order_id}: "
+                            f"{str(dlq_error)}. Message will be lost!"
+                        )
+                        return True  # Commit anyway to avoid blocking partition
+                
+                else:
+                    # Calculate backoff and wait before next retry
+                    backoff_seconds = self._calculate_backoff(attempt)
+                    logger.warning(
+                        f"Will retry order {order_id} in {backoff_seconds:.1f} seconds "
+                        f"(retry {attempt + 1}/{settings.DLQ_MAX_RETRIES})"
+                    )
+                    time.sleep(backoff_seconds)
+                    # Continue to next attempt
+    
     def _consume_loop(self):
-        """Main consumer loop that runs in background thread"""
-        logger.info("Consumer loop started")
+        """
+        Main consumer loop with DLQ support
+        
+        This loop:
+        1. Polls for messages
+        2. Processes with retry logic (retries happen inside _process_message_with_retry)
+        3. Commits offset after processing completes (success or DLQ)
+        """
+        logger.info("Consumer loop started with DLQ support")
+        logger.info(f"DLQ Topic: {settings.KAFKA_DLQ_TOPIC}")
+        logger.info(f"Max Retries: {settings.DLQ_MAX_RETRIES}")
+        logger.info(f"Initial Backoff: {settings.DLQ_RETRY_BACKOFF_MS}ms")
         
         while self.is_running:
             try:
@@ -130,19 +273,18 @@ class KafkaConsumerService:
                     logger.error(f"Consumer error: {msg.error()}")
                     continue
                 
-                # Message successfully received
-                order_data = msg.value()  # Already deserialized by AvroConsumer
+                # Process message with retry logic (blocks until handled)
+                self._process_message_with_retry(msg)
                 
-                if order_data:
-                    order_id = order_data.get('orderId', 'Unknown')
-                    logger.info(f"Received order event: {order_id}, status: {order_data.get('status')}")
-                    
-                    # Call the message handler if set
-                    if self.message_handler:
-                        try:
-                            self.message_handler(order_data)
-                        except Exception as e:
-                            logger.error(f"Error in message handler for order {order_id}: {str(e)}")
+                # Commit offset after message is handled (success or DLQ)
+                try:
+                    self.consumer.commit(message=msg, asynchronous=False)
+                    logger.debug(
+                        f"Offset committed: topic={msg.topic()}, "
+                        f"partition={msg.partition()}, offset={msg.offset()}"
+                    )
+                except Exception as commit_error:
+                    logger.error(f"Failed to commit offset: {commit_error}")
                 
             except KeyboardInterrupt:
                 logger.info("Consumer interrupted by user")

@@ -26,9 +26,23 @@ class Settings:
         'group.id': KAFKA_CONSUMER_GROUP,
         'client.id': 'order-service-consumer',
         'auto.offset.reset': 'earliest',  # Read from beginning to get all messages
-        'enable.auto.commit': True,
-        'auto.commit.interval.ms': 5000,
+        'enable.auto.commit': False,  # Manual offset management for DLQ support
         'max.poll.interval.ms': 300000,
+    }
+    
+    # Dead Letter Queue (DLQ) Settings
+    KAFKA_DLQ_TOPIC: str = os.getenv("KAFKA_DLQ_TOPIC", "order-events-dlq")
+    DLQ_MAX_RETRIES: int = int(os.getenv("DLQ_MAX_RETRIES", "3"))
+    DLQ_RETRY_BACKOFF_MS: int = int(os.getenv("DLQ_RETRY_BACKOFF_MS", "1000"))  # Initial backoff in ms
+    DLQ_MAX_BACKOFF_MS: int = int(os.getenv("DLQ_MAX_BACKOFF_MS", "30000"))  # Max backoff 30 seconds
+    
+    # Kafka Producer Settings (for DLQ)
+    KAFKA_PRODUCER_CONFIG = {
+        'client.id': 'order-service-dlq-producer',
+        'acks': 'all',  # Wait for all replicas
+        'retries': 3,
+        'max.in.flight.requests.per.connection': 1,
+        'compression.type': 'gzip',
     }
     
     # Business Logic Settings

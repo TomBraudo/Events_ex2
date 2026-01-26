@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.controllers import order_router
-from service.kafka import KafkaConsumerService
+from service.kafka import KafkaConsumerService, dlq_producer
 from business.order import OrderProcessor
 from config.settings import settings
 import logging
@@ -64,7 +64,7 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Run on application shutdown - stop Kafka consumer"""
+    """Run on application shutdown - stop Kafka consumer and DLQ producer"""
     logger.info(f"Shutting down {settings.APP_NAME}")
     
     try:
@@ -73,6 +73,12 @@ async def shutdown_event():
         logger.info("Kafka consumer stopped successfully")
     except Exception as e:
         logger.error(f"Error stopping Kafka consumer: {str(e)}")
+    
+    try:
+        dlq_producer.close()
+        logger.info("DLQ producer closed successfully")
+    except Exception as e:
+        logger.error(f"Error closing DLQ producer: {str(e)}")
 
 
 @app.get("/", tags=["health"])

@@ -39,43 +39,47 @@ class OrderProcessor:
         
         Args:
             order_data: Order dictionary from Kafka (Avro deserialized)
+        
+        Raises:
+            Exception: If processing fails (for DLQ retry logic)
         """
+        order_id = order_data.get('orderId', 'Unknown')
+        
+        # TEST: Simulate failure for DLQ testing
+        if order_id.startswith("TEST-FAIL"):
+            logger.error(f"Simulated processing failure for {order_id}")
+            raise ValueError(f"Simulated processing failure for {order_id}")
+        
+        # Validate order data using Pydantic model
         try:
-            order_id = order_data.get('orderId', 'Unknown')
-            
-            # Validate order data using Pydantic model
-            try:
-                order = Order(**order_data)
-                logger.info(f"Order validated: {order_id}")
-            except Exception as e:
-                logger.error(f"Order validation failed for {order_id}: {str(e)}")
-                return
-            
-            # Calculate shipping cost
-            shipping_cost = self.calculate_shipping_cost(order.totalAmount)
-            logger.info(f"Calculated shipping cost for {order_id}: {shipping_cost} (2% of {order.totalAmount})")
-            
-            # Create order with shipping cost
-            order_with_shipping_data = {
-                **order_data,
-                'shippingCost': shipping_cost
-            }
-            
-            # Validate with OrderWithShipping model
-            order_with_shipping = OrderWithShipping(**order_with_shipping_data)
-            
-            # Store in memory
-            self.storage.save_order(order_with_shipping.model_dump())
-            
-            logger.info(
-                f"Order processed and stored: {order_id}, "
-                f"status: {order.status}, "
-                f"totalAmount: {order.totalAmount}, "
-                f"shippingCost: {shipping_cost}"
-            )
-            
+            order = Order(**order_data)
+            logger.info(f"Order validated: {order_id}")
         except Exception as e:
-            logger.error(f"Error processing order event: {str(e)}")
+            logger.error(f"Order validation failed for {order_id}: {str(e)}")
+            raise  # Re-raise for DLQ handling
+        
+        # Calculate shipping cost
+        shipping_cost = self.calculate_shipping_cost(order.totalAmount)
+        logger.info(f"Calculated shipping cost for {order_id}: {shipping_cost} (2% of {order.totalAmount})")
+        
+        # Create order with shipping cost
+        order_with_shipping_data = {
+            **order_data,
+            'shippingCost': shipping_cost
+        }
+        
+        # Validate with OrderWithShipping model
+        order_with_shipping = OrderWithShipping(**order_with_shipping_data)
+        
+        # Store in memory
+        self.storage.save_order(order_with_shipping.model_dump())
+        
+        logger.info(
+            f"Order processed and stored: {order_id}, "
+            f"status: {order.status}, "
+            f"totalAmount: {order.totalAmount}, "
+            f"shippingCost: {shipping_cost}"
+        )
     
     def get_order_details(self, order_id: str) -> Dict[str, Any]:
         """

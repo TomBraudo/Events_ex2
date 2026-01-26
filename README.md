@@ -251,6 +251,27 @@ This project uses **Avro serialization with Schema Registry** for:
 
 **Schema Registry UI**: http://localhost:8081
 
+### 🔄 Dead Letter Queue (DLQ) Implementation
+
+The **OrderService consumer** implements a robust DLQ pattern for handling message processing failures:
+- ✅ **Automatic Retries** - Exponential backoff with configurable retry count (default: 3)
+- ✅ **Manual Offset Management** - Only commit after successful processing or DLQ send
+- ✅ **Zero Data Loss** - Failed messages are preserved in DLQ topic
+- ✅ **Rich Metadata** - Full error context, timestamps, and retry history
+- ✅ **Monitoring APIs** - Endpoints to inspect DLQ configuration and messages
+
+**Key Features:**
+- Failed messages are retried with exponential backoff (1s, 2s, 4s, ...)
+- After max retries, messages are sent to `order-events-dlq` topic
+- DLQ messages include error details, retry count, and original message
+- Consumer continues processing other messages (no blocking)
+
+**API Endpoints:**
+- `GET /api/dlq/info` - View DLQ configuration and retry statistics
+- `GET /api/dlq/messages` - Retrieve all messages from DLQ topic
+
+**Documentation**: See [OrderService/DLQ_README.md](OrderService/DLQ_README.md) for complete details
+
 ## 📋 Services
 
 | Service | Port | Role | Description |

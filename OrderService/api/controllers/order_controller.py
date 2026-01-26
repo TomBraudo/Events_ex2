@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException, status, Query
 from pydantic import BaseModel, Field
 from business.order import OrderProcessor
-from service.kafka import KafkaConsumerService
+from service.kafka import KafkaConsumerService, dlq_producer
 from models import OrderWithShipping
+from config.settings import settings
 from typing import Dict, Any, List
 import logging
 
@@ -226,4 +227,79 @@ async def get_stats():
         "totalOrders": count,
         "orderIds": order_ids
     }
+
+
+@router.get(
+    "/dlq/info",
+    tags=["dlq"],
+    status_code=status.HTTP_200_OK
+)
+async def get_dlq_info():
+    """
+    Get Dead Letter Queue (DLQ) configuration and statistics
+    
+    Returns:
+    - DLQ topic name
+    - Max retry count
+    - Retry backoff configuration
+    - Consumer status
+    """
+    return {
+        "success": True,
+        "dlqConfig": {
+            "dlqTopic": settings.KAFKA_DLQ_TOPIC,
+            "maxRetries": settings.DLQ_MAX_RETRIES,
+            "initialBackoffMs": settings.DLQ_RETRY_BACKOFF_MS,
+            "maxBackoffMs": settings.DLQ_MAX_BACKOFF_MS,
+            "retryStrategy": "exponential_backoff"
+        },
+        "consumerStats": {
+            "isRunning": kafka_consumer.is_running,
+            "consumerGroup": settings.KAFKA_CONSUMER_GROUP
+        }
+    }
+
+
+@router.get(
+    "/dlq/messages",
+    tags=["dlq"],
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "DLQ messages retrieved successfully"},
+        503: {"description": "Service unavailable (Kafka)"}
+    }
+)
+async def get_dlq_messages():
+    """
+    Retrieve all messages from the Dead Letter Queue
+    
+    This endpoint reads all messages from the DLQ topic to help
+    with monitoring and debugging failed message processing.
+    """
+    try:
+        logger.info(f"Reading messages from DLQ topic: {settings.KAFKA_DLQ_TOPIC}")
+        
+        # Read all messages from DLQ topic
+        dlq_messages = kafka_consumer.get_all_messages_from_topic(
+            settings.KAFKA_DLQ_TOPIC,
+            timeout_seconds=5
+        )
+        
+        return {
+            "success": True,
+            "dlqTopic": settings.KAFKA_DLQ_TOPIC,
+            "messageCount": len(dlq_messages),
+            "messages": dlq_messages
+        }
+        
+    except Exception as e:
+        logger.error(f"Error reading from DLQ: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "success": False,
+                "error": "Failed to read from DLQ",
+                "details": str(e)
+            }
+        )
 
