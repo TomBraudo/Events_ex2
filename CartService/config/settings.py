@@ -12,6 +12,7 @@ class Settings:
     # Kafka Settings
     KAFKA_BOOTSTRAP_SERVERS: str = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
     KAFKA_TOPIC: str = os.getenv("KAFKA_TOPIC", "order-events")
+    KAFKA_STATUS_UPDATE_TOPIC: str = os.getenv("KAFKA_STATUS_UPDATE_TOPIC", "order-status-updates")
     
     # Schema Registry Settings
     SCHEMA_REGISTRY_URL: str = os.getenv("SCHEMA_REGISTRY_URL", "http://localhost:8081")

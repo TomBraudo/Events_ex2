@@ -155,22 +155,25 @@ async def create_order(request: CreateOrderRequest):
 @router.put(
     "/update-order",
     response_model=OrderResponse,
-    status_code=status.HTTP_200_OK,
+    status_code=status.HTTP_202_ACCEPTED,
     responses={
-        200: {"description": "Order updated successfully"},
+        202: {"description": "Status update event published (processing asynchronously)"},
         400: {"description": "Validation error or bad request"},
-        404: {"description": "Order not found"},
         500: {"description": "Internal server error"},
         503: {"description": "Service unavailable (Kafka/Schema Registry)"}
     }
 )
 async def update_order(request: UpdateOrderRequest):
     """
-    Update an existing order's status.
+    Update an existing order's status (async event-driven).
     
-    This endpoint receives orderId and status, validates them (status can be any
-    non-empty string), updates the order in storage, and publishes the update
-    event to Kafka.
+    This endpoint publishes a status update event to Kafka. The OrderService
+    consumer will validate if the order exists and update it asynchronously.
+    
+    - If order exists: Status will be updated
+    - If order doesn't exist: Event will be sent to DLQ after retries
+    
+    Returns 202 Accepted since processing happens asynchronously.
     """
     try:
         logger.info(f"Received update order request: orderId={request.orderId}, status={request.status}")
@@ -183,33 +186,21 @@ async def update_order(request: UpdateOrderRequest):
         
         return OrderResponse(
             success=True,
-            message=f"Order '{request.orderId}' updated successfully",
+            message=f"Status update event published for order '{request.orderId}'. Processing asynchronously.",
             data=updated_order
         )
     
     except ValueError as e:
-        # Check if it's a "not found" error or validation error
-        if "not found" in str(e).lower():
-            logger.warning(f"Order not found: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={
-                    "success": False,
-                    "error": "Not Found",
-                    "details": str(e)
-                }
-            )
-        else:
-            # Other validation errors
-            logger.warning(f"Validation error: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "success": False,
-                    "error": "Validation Error",
-                    "details": str(e)
-                }
-            )
+        # Validation errors
+        logger.warning(f"Validation error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "success": False,
+                "error": "Validation Error",
+                "details": str(e)
+            }
+        )
     
     except ConnectionError as e:
         # Kafka connection errors (503 Service Unavailable)

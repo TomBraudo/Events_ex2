@@ -1,0 +1,28 @@
+{
+  "type": "record",
+  "name": "OrderStatusUpdate",
+  "namespace": "com.ecommerce.order",
+  "fields": [
+    {
+      "name": "orderId",
+      "type": "string",
+      "doc": "Unique identifier for the order to update"
+    },
+    {
+      "name": "status",
+      "type": "string",
+      "doc": "New status for the order"
+    },
+    {
+      "name": "updateTimestamp",
+      "type": "string",
+      "doc": "Timestamp when update was requested (ISO 8601 format)"
+    },
+    {
+      "name": "eventType",
+      "type": "string",
+      "default": "STATUS_UPDATE",
+      "doc": "Type of event (STATUS_UPDATE)"
+    }
+  ]
+}

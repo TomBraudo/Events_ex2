@@ -118,6 +118,56 @@ class OrderProcessor:
             Number of orders in storage
         """
         return self.storage.get_order_count()
+    
+    def process_status_update_event(self, status_update_data: Dict[str, Any]) -> None:
+        """
+        Process a status update event from Kafka
+        
+        This method:
+        1. Validates that the order exists
+        2. Updates the order status
+        3. Stores the updated order
+        
+        If the order doesn't exist, raises ValueError which will trigger
+        retry logic and eventually send to DLQ.
+        
+        Args:
+            status_update_data: Status update dictionary from Kafka (Avro deserialized)
+        
+        Raises:
+            ValueError: If order not found (will be sent to DLQ after retries)
+            Exception: If processing fails
+        """
+        order_id = status_update_data.get('orderId', 'Unknown')
+        new_status = status_update_data.get('status')
+        
+        logger.info(f"Processing status update event for order: {order_id}, new status: {new_status}")
+        
+        # Check if order exists in storage
+        existing_order = self.storage.get_order(order_id)
+        
+        if not existing_order:
+            error_msg = f"Order {order_id} not found. Cannot update status. Sending to DLQ."
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        # Validate new status is not empty
+        if not new_status or not str(new_status).strip():
+            error_msg = f"Invalid status update for order {order_id}: status is empty"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        # Update status
+        old_status = existing_order.get('status')
+        existing_order['status'] = new_status
+        
+        # Save updated order
+        self.storage.save_order(existing_order)
+        
+        logger.info(
+            f"Status update successful: order {order_id}, "
+            f"status changed from '{old_status}' to '{new_status}'"
+        )
 
 
 # Singleton instance

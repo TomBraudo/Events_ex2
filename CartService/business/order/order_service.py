@@ -2,6 +2,7 @@ from typing import Dict, Any
 from models import Order
 from utils.order_generator import OrderGenerator
 from service.kafka import KafkaProducerService
+from service.kafka.status_update_producer import status_update_producer_service
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -13,6 +14,7 @@ class OrderService:
     
     def __init__(self):
         self.kafka_producer = KafkaProducerService()
+        self.status_update_producer = status_update_producer_service
     
     def create_order(self, order_id: str, num_items: int) -> Dict[str, Any]:
         """
@@ -56,17 +58,17 @@ class OrderService:
     
     def update_order_status(self, order_id: str, new_status: str) -> Dict[str, Any]:
         """
-        Update the status of an existing order
+        Update the status of an existing order (async event-driven approach)
         
-        Note: CartService doesn't store orders. This publishes a status update event.
-        In a real system, you'd first retrieve the order from OrderService API.
+        This publishes a status update event to Kafka. OrderService consumer
+        will validate if the order exists and update it, or send to DLQ if not found.
         
         Args:
             order_id: The order ID to update
             new_status: The new status value
             
         Returns:
-            Status update event data
+            Status update event confirmation
             
         Raises:
             ValueError: If status is invalid
@@ -78,42 +80,29 @@ class OrderService:
             raise ValueError("Status cannot be empty or whitespace")
         new_status = new_status.strip()
         
-        # Create a minimal status update event
-        # In production, you'd retrieve the full order from OrderService first
-        status_update_event = {
-            "orderId": order_id,
-            "status": new_status,
-            "updateType": "STATUS_CHANGE"
-        }
-        
         logger.info(f"Publishing status update event: {order_id} -> '{new_status}'")
         
-        # Publish status update to Kafka
+        # Publish status update to Kafka (async - fire and forget)
         try:
-            # Note: This is a simplified implementation
-            # Production systems would either:
-            # 1. Call OrderService API to get full order, update status, republish
-            # 2. Use a separate status-update topic with event sourcing
-            # 3. Implement CQRS pattern
+            self.status_update_producer.publish_status_update(order_id, new_status)
             
-            # For now, just log a warning
-            logger.warning(
-                f"Status update requested for {order_id}. "
-                f"CartService no longer stores orders. "
-                f"This endpoint is deprecated in event-driven architecture."
+            logger.info(
+                f"Status update event published successfully for {order_id}. "
+                f"OrderService will process asynchronously."
             )
-            raise ValueError(
-                f"Status updates not supported. CartService is producer-only. "
-                f"To update an order, retrieve it from OrderService "
-                f"(GET http://localhost:8001/api/order-details?orderId={order_id}), "
-                f"then create a new order event with updated status."
-            )
+            
+            return {
+                "orderId": order_id,
+                "status": new_status,
+                "message": "Status update event published. Processing asynchronously.",
+                "eventType": "STATUS_UPDATE"
+            }
             
         except ConnectionError as e:
-            logger.error(f"Failed to publish to Kafka: {str(e)}")
+            logger.error(f"Failed to publish status update to Kafka: {str(e)}")
             raise
         except Exception as e:
-            logger.error(f"Error: {str(e)}")
+            logger.error(f"Error publishing status update: {str(e)}")
             raise
 
 
