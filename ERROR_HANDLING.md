@@ -239,7 +239,40 @@ if num_items < 1 or num_items > 100:
 
 ---
 
-## 11. Exception Propagation
+## 11. Duplicate Order Detection
+
+**Location:** `OrderService/business/order/order_processor.py`
+
+**Purpose:** Prevent duplicate orders from overwriting existing data.
+
+**Implementation:**
+- Check if orderId already exists in storage before processing
+- Raise ValueError if duplicate detected
+- Propagate to DLQ after retry attempts
+
+**Code:**
+```python
+def process_order_event(self, order_data):
+    order_id = order_data.get('orderId')
+    
+    # Check for duplicate
+    if self.storage.order_exists(order_id):
+        raise ValueError(f"Duplicate order ID: {order_id} already exists")
+    
+    # Continue processing...
+```
+
+**Flow:**
+1. First order with ID "ORD-001" → Processed & stored ✅
+2. Second order with ID "ORD-001" → Duplicate detected → Retry → DLQ 📮
+
+**Why DLQ instead of silent overwrite:**
+- Preserves data integrity
+- Alerts to potential bugs or user errors
+- Allows investigation of duplicate submissions
+- Follows same pattern as status updates for non-existent orders
+
+## 12. Exception Propagation
 
 **Location:** `OrderService/business/order/order_processor.py`
 
@@ -271,7 +304,9 @@ except Exception as e:
 
 ## Testing DLQ
 
-To test the DLQ mechanism, use the special `TEST-FAIL` order ID:
+### Test 1: Simulated Failure (TEST-FAIL)
+
+Use the special `TEST-FAIL` order ID prefix:
 
 ```bash
 # This will intentionally fail processing and land in DLQ
@@ -290,6 +325,46 @@ curl -X POST http://localhost:8000/api/create-order \
 7. Sent to DLQ topic
 8. Offset committed
 9. Consumer continues with next message
+
+### Test 2: Duplicate Order ID
+
+Create the same order twice:
+
+```bash
+# Create order first time (succeeds)
+curl -X POST http://localhost:8000/api/create-order \
+  -H "Content-Type: application/json" \
+  -d '{"orderId": "DUP-001", "numItems": 2}'
+
+# Create same order again (duplicate - goes to DLQ)
+curl -X POST http://localhost:8000/api/create-order \
+  -H "Content-Type: application/json" \
+  -d '{"orderId": "DUP-001", "numItems": 3}'
+```
+
+**Expected Flow:**
+1. First request: 201 Created → Processes successfully
+2. Second request: 201 Created (CartService doesn't check duplicates)
+3. OrderService detects duplicate → Fails
+4. Retries 3 times → Still fails (still duplicate)
+5. Sent to DLQ with error: "Duplicate order ID: DUP-001 already exists"
+
+### Test 3: Non-Existent Order Status Update
+
+Try to update an order that doesn't exist:
+
+```bash
+# Update order that was never created
+curl -X PUT http://localhost:8000/api/update-order \
+  -H "Content-Type: application/json" \
+  -d '{"orderId": "NEVER-CREATED", "status": "shipped"}'
+```
+
+**Expected Flow:**
+1. Returns 202 Accepted (async processing)
+2. OrderService processes → Order not found
+3. Retries 3 times → Still not found
+4. Sent to DLQ with error: "Order NEVER-CREATED not found"
 
 Check DLQ contents:
 ```bash

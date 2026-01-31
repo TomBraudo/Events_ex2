@@ -28,19 +28,42 @@ class OrderProcessor:
         shipping_cost = total_amount * self.shipping_percentage
         return round(shipping_cost, 2)
     
+    def process_event(self, event: Dict[str, Any]) -> None:
+        """
+        Route event based on eventType
+        
+        Args:
+            event: Event envelope with eventType and payload
+            
+        Raises:
+            ValueError: If unknown event type
+        """
+        event_type = event.get('eventType')
+        
+        if event_type == 'ORDER_CREATED':
+            payload = event.get('payload')
+            self.process_order_event(payload)
+        elif event_type == 'STATUS_UPDATED':
+            payload = event.get('payload')
+            self.process_status_update_event(payload)
+        else:
+            raise ValueError(f"Unknown event type: {event_type}")
+    
     def process_order_event(self, order_data: Dict[str, Any]) -> None:
         """
         Process an incoming order event from Kafka
         
         This method:
         1. Validates the order data
-        2. Calculates shipping cost
-        3. Stores the order with shipping cost
+        2. Checks for duplicate orderId
+        3. Calculates shipping cost
+        4. Stores the order with shipping cost
         
         Args:
             order_data: Order dictionary from Kafka (Avro deserialized)
         
         Raises:
+            ValueError: If duplicate orderId or validation fails (will be sent to DLQ after retries)
             Exception: If processing fails (for DLQ retry logic)
         """
         order_id = order_data.get('orderId', 'Unknown')
@@ -49,6 +72,12 @@ class OrderProcessor:
         if order_id.startswith("TEST-FAIL"):
             logger.error(f"Simulated processing failure for {order_id}")
             raise ValueError(f"Simulated processing failure for {order_id}")
+        
+        # Check for duplicate order ID
+        if self.storage.order_exists(order_id):
+            error_msg = f"Duplicate order ID: {order_id} already exists. Cannot create duplicate order."
+            logger.error(error_msg)
+            raise ValueError(error_msg)
         
         # Validate order data using Pydantic model
         try:

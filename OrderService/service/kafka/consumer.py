@@ -32,7 +32,7 @@ class KafkaConsumerService:
         self.max_consecutive_errors = settings.CONSUMER_MAX_CONSECUTIVE_ERRORS
         
         # Schema caching
-        self.schema_cache_path = settings.BASE_DIR / "schemas" / ".schema_cache"
+        self.schema_cache_path = settings.BASE_DIR / "schemas" / ".event_schema_cache"
         
         self._load_avro_schema()
     
@@ -247,27 +247,27 @@ class KafkaConsumerService:
         Returns:
             bool: True if handled (success or sent to DLQ), False should never happen
         """
-        order_data = msg.value()  # Already deserialized by AvroConsumer
+        event = msg.value()  # Already deserialized by AvroConsumer
         
-        if not order_data:
+        if not event:
             logger.warning("Received empty message, skipping")
             return True
         
-        order_id = order_data.get('orderId', 'Unknown')
+        order_id = event.get('orderId', 'Unknown')
+        event_type = event.get('eventType', 'UNKNOWN')
         first_failure_timestamp = None
         
         # Retry loop - process the same message up to MAX_RETRIES + 1 times
         for attempt in range(settings.DLQ_MAX_RETRIES + 1):
             try:
                 logger.info(
-                    f"Processing order event: {order_id}, "
-                    f"status: {order_data.get('status')}, "
+                    f"Processing event: type={event_type}, orderId={order_id}, "
                     f"attempt: {attempt + 1}/{settings.DLQ_MAX_RETRIES + 1}"
                 )
                 
-                # Call the message handler
+                # Call the message handler with the event envelope
                 if self.message_handler:
-                    self.message_handler(order_data)
+                    self.message_handler(event)
                 
                 # Success!
                 if attempt > 0:
@@ -299,7 +299,7 @@ class KafkaConsumerService:
                     try:
                         dlq_producer = self._get_dlq_producer()
                         success = dlq_producer.send_to_dlq(
-                            message_value=order_data,
+                            message_value=event,
                             message_key=order_id,
                             error=e,
                             retry_count=attempt,

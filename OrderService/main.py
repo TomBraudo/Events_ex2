@@ -2,7 +2,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.controllers import order_router
 from service.kafka import KafkaConsumerService, dlq_producer
-from service.kafka.status_update_consumer import status_update_consumer_service
 from business.order import OrderProcessor
 from config.settings import settings
 import logging
@@ -37,7 +36,6 @@ app.include_router(order_router)
 
 # Global instances
 kafka_consumer = KafkaConsumerService()
-status_update_consumer = status_update_consumer_service
 order_processor = OrderProcessor()
 
 
@@ -51,30 +49,17 @@ async def startup_event():
     logger.info(f"Consumer Group: {settings.KAFKA_CONSUMER_GROUP}")
     
     try:
-        # Set the message handler to process orders
-        kafka_consumer.set_message_handler(order_processor.process_order_event)
+        # Set the message handler to route events based on eventType
+        kafka_consumer.set_message_handler(order_processor.process_event)
         
-        # Start consuming order events in background
+        # Start consuming all events from single topic
         kafka_consumer.start_consuming([settings.KAFKA_TOPIC])
         
-        logger.info("✅ Kafka consumer started successfully - listening for order events")
+        logger.info("✅ Kafka consumer started successfully - listening for all order events (ORDER_CREATED, STATUS_UPDATED)")
         
     except Exception as e:
         logger.error(f"❌ Failed to start Kafka consumer: {str(e)}")
-        logger.warning("⚠️  API will still be available, but order events won't be processed")
-    
-    try:
-        # Set the message handler to process status updates
-        status_update_consumer.set_message_handler(order_processor.process_status_update_event)
-        
-        # Start consuming status update events in background
-        status_update_consumer.start_consuming([settings.KAFKA_STATUS_UPDATE_TOPIC])
-        
-        logger.info("✅ Status update consumer started successfully - listening for status update events")
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to start status update consumer: {str(e)}")
-        logger.warning("⚠️  Status updates won't be processed")
+        logger.warning("⚠️  API will still be available, but events won't be processed")
 
 
 @app.on_event("shutdown")
@@ -88,13 +73,6 @@ async def shutdown_event():
         logger.info("Kafka consumer stopped successfully")
     except Exception as e:
         logger.error(f"Error stopping Kafka consumer: {str(e)}")
-    
-    try:
-        status_update_consumer.stop_consuming()
-        status_update_consumer.close()
-        logger.info("Status update consumer stopped successfully")
-    except Exception as e:
-        logger.error(f"Error stopping status update consumer: {str(e)}")
     
     try:
         dlq_producer.close()
@@ -117,6 +95,7 @@ async def root():
         "schema_registry": settings.SCHEMA_REGISTRY_URL,
         "consuming_topic": settings.KAFKA_TOPIC,
         "consumer_group": settings.KAFKA_CONSUMER_GROUP,
+        "event_types_supported": ["ORDER_CREATED", "STATUS_UPDATED"],
         "processed_orders": order_count
     }
 
@@ -127,8 +106,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": settings.APP_NAME,
-        "order_consumer_running": kafka_consumer.is_running,
-        "status_update_consumer_running": status_update_consumer.is_running
+        "consumer_running": kafka_consumer.is_running
     }
 
 

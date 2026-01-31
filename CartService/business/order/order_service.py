@@ -2,7 +2,6 @@ from typing import Dict, Any
 from models import Order
 from utils.order_generator import OrderGenerator
 from service.kafka import KafkaProducerService
-from service.kafka.status_update_producer import status_update_producer_service
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -14,7 +13,6 @@ class OrderService:
     
     def __init__(self):
         self.kafka_producer = KafkaProducerService()
-        self.status_update_producer = status_update_producer_service
     
     def create_order(self, order_id: str, num_items: int) -> Dict[str, Any]:
         """
@@ -84,7 +82,7 @@ class OrderService:
         
         # Publish status update to Kafka (async - fire and forget)
         try:
-            self.status_update_producer.publish_status_update(order_id, new_status)
+            self.kafka_producer.publish_status_update_event(order_id, new_status)
             
             logger.info(
                 f"Status update event published successfully for {order_id}. "
@@ -95,7 +93,7 @@ class OrderService:
                 "orderId": order_id,
                 "status": new_status,
                 "message": "Status update event published. Processing asynchronously.",
-                "eventType": "STATUS_UPDATE"
+                "eventType": "STATUS_UPDATED"
             }
             
         except ConnectionError as e:

@@ -23,7 +23,7 @@ class KafkaProducerService:
     def __init__(self):
         self.producer = None
         self.avro_schema = None
-        self.schema_cache_path = settings.BASE_DIR / "schemas" / ".schema_cache"
+        self.schema_cache_path = settings.BASE_DIR / "schemas" / ".event_schema_cache"
         self._load_avro_schema()
     
     def _load_avro_schema(self):
@@ -125,9 +125,9 @@ class KafkaProducerService:
     
     def publish_order_event(self, order: Dict[str, Any]) -> bool:
         """
-        Publish order event to Kafka topic with Avro serialization and retry logic
+        Publish order creation event to Kafka topic with Avro serialization
         
-        Implements exponential backoff retry for transient failures.
+        Wraps order in event envelope with ORDER_CREATED type.
         
         Args:
             order: Order dictionary to be published
@@ -139,8 +139,65 @@ class KafkaProducerService:
             ConnectionError: If Kafka broker is not available after retries
             Exception: For other errors during publishing
         """
-        last_exception = None
+        from datetime import datetime
+        
         order_id = order.get('orderId', 'Unknown')
+        
+        # Wrap order in event envelope
+        event = {
+            'eventType': 'ORDER_CREATED',
+            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'orderId': order_id,
+            'payload': order
+        }
+        
+        return self._publish_event(event, order_id)
+    
+    def publish_status_update_event(self, order_id: str, new_status: str) -> bool:
+        """
+        Publish status update event to Kafka topic with Avro serialization
+        
+        Wraps status update in event envelope with STATUS_UPDATED type.
+        
+        Args:
+            order_id: Order ID to update
+            new_status: New status value
+            
+        Returns:
+            bool: True if successful
+            
+        Raises:
+            ConnectionError: If Kafka broker is not available after retries
+            Exception: For other errors during publishing
+        """
+        from datetime import datetime
+        
+        # Wrap status update in event envelope
+        event = {
+            'eventType': 'STATUS_UPDATED',
+            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'orderId': order_id,
+            'payload': {
+                'orderId': order_id,
+                'status': new_status
+            }
+        }
+        
+        return self._publish_event(event, order_id)
+    
+    def _publish_event(self, event: Dict[str, Any], order_id: str) -> bool:
+        """
+        Internal method to publish event with retry logic
+        
+        Args:
+            event: Event envelope to publish
+            order_id: Order ID for logging
+            
+        Returns:
+            bool: True if successful
+        """
+        last_exception = None
+        event_type = event.get('eventType')
         
         for attempt in range(settings.PRODUCER_MAX_RETRIES + 1):
             try:
@@ -149,13 +206,13 @@ class KafkaProducerService:
                     self.connect()
                 
                 # Use orderId as the key for partitioning
-                key = order.get('orderId', '')
+                key = order_id
                 
                 # Publish message
                 self.producer.produce(
                     topic=settings.KAFKA_TOPIC,
                     key=key,
-                    value=order,
+                    value=event,
                     callback=self._delivery_callback
                 )
                 
@@ -165,7 +222,7 @@ class KafkaProducerService:
                 if remaining_messages > 0:
                     raise Exception(f"Failed to flush {remaining_messages} messages within timeout")
                 
-                logger.info(f"Successfully published order event for orderId: {order_id}")
+                logger.info(f"Successfully published {event_type} event for orderId: {order_id}")
                 return True
                 
             except BufferError as e:

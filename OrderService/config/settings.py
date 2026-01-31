@@ -12,14 +12,13 @@ class Settings:
     # Kafka Settings
     KAFKA_BOOTSTRAP_SERVERS: str = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
     KAFKA_TOPIC: str = os.getenv("KAFKA_TOPIC", "order-events")
-    KAFKA_STATUS_UPDATE_TOPIC: str = os.getenv("KAFKA_STATUS_UPDATE_TOPIC", "order-status-updates")
     
     # Schema Registry Settings
     SCHEMA_REGISTRY_URL: str = os.getenv("SCHEMA_REGISTRY_URL", "http://localhost:8081")
     
     # Avro Schema Path
     BASE_DIR: Path = Path(__file__).resolve().parent.parent
-    AVRO_SCHEMA_PATH: Path = BASE_DIR / "schemas" / "order.avsc"
+    AVRO_SCHEMA_PATH: Path = BASE_DIR / "schemas" / "order_event.avsc"
     
     # Kafka Consumer Settings
     KAFKA_CONSUMER_GROUP: str = os.getenv("KAFKA_CONSUMER_GROUP", "order-service-group")
